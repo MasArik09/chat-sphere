@@ -1,0 +1,45 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Go
+backend/build/
+backend/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+backend/vendor/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/src/assets/hero-*.png
+node_modules/
+dist/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+postgres_data/
+
+# Coverage
+coverage/
+*.out

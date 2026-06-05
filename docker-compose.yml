@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: chatsphere-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-chatsphere}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-chatsphere}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatsphere-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: chatsphere-backend
+    restart: always
+    environment:
+      PORT: ${PORT:-8080}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-postgres}
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      DB_NAME: ${DB_NAME:-chatsphere}
+      JWT_SECRET: ${JWT_SECRET:-super_secret_jwt_key_chatsphere_v1_2026}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - chatsphere-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chatsphere-frontend
+    restart: always
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8080}
+      VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8080/ws}
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - chatsphere-network
+
+volumes:
+  postgres_data:
+
+networks:
+  chatsphere-network:
+    driver: bridge
