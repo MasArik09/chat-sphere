@@ -11,7 +11,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"chatsphere/internal/auth"
+	"chatsphere/internal/conversations"
 	"chatsphere/internal/database"
+	"chatsphere/internal/users"
 	"chatsphere/pkg/config"
 )
 
@@ -42,6 +45,35 @@ func main() {
 
 	// Configure CORS middleware (standard for cross-origin local dev)
 	router.Use(corsMiddleware())
+
+	// Initialize Repositories, Services, and Handlers
+	userRepo := users.NewPostgresUserRepository(db)
+	authService := auth.NewAuthService(userRepo, cfg)
+	authHandler := auth.NewAuthHandler(authService, userRepo)
+
+	conversationRepo := conversations.NewPostgresConversationRepository(db)
+	conversationService := conversations.NewConversationService(conversationRepo)
+	conversationHandler := conversations.NewConversationHandler(conversationService)
+
+	// API Routing Groups
+	v1 := router.Group("/api/v1")
+	{
+		authGroup := v1.Group("/auth")
+		{
+			authGroup.POST("/register", authHandler.Register)
+			authGroup.POST("/login", authHandler.Login)
+			authGroup.GET("/me", auth.AuthMiddleware(cfg), authHandler.Me)
+		}
+
+		convGroup := v1.Group("/conversations", auth.AuthMiddleware(cfg))
+		{
+			convGroup.POST("", conversationHandler.Create)
+			convGroup.GET("", conversationHandler.List)
+			convGroup.GET("/:id", conversationHandler.Detail)
+			convGroup.POST("/:id/participants", conversationHandler.AddParticipant)
+			convGroup.DELETE("/:id/participants/:userId", conversationHandler.RemoveParticipant)
+		}
+	}
 
 	// Register health check endpoint
 	router.GET("/health", healthCheckHandler(db))
