@@ -14,6 +14,7 @@ import (
 	"chatsphere/internal/auth"
 	"chatsphere/internal/conversations"
 	"chatsphere/internal/database"
+	"chatsphere/internal/messages"
 	"chatsphere/internal/users"
 	"chatsphere/pkg/config"
 )
@@ -55,6 +56,10 @@ func main() {
 	conversationService := conversations.NewConversationService(conversationRepo)
 	conversationHandler := conversations.NewConversationHandler(conversationService)
 
+	messageRepo := messages.NewPostgresMessageRepository(db)
+	messageService := messages.NewMessageService(messageRepo, conversationRepo)
+	messageHandler := messages.NewMessageHandler(messageService)
+
 	// API Routing Groups
 	v1 := router.Group("/api/v1")
 	{
@@ -72,6 +77,10 @@ func main() {
 			convGroup.GET("/:id", conversationHandler.Detail)
 			convGroup.POST("/:id/participants", conversationHandler.AddParticipant)
 			convGroup.DELETE("/:id/participants/:userId", conversationHandler.RemoveParticipant)
+
+			// Message routes nested under conversations
+			convGroup.POST("/:id/messages", messageHandler.Send)
+			convGroup.GET("/:id/messages", messageHandler.List)
 		}
 	}
 

@@ -25,6 +25,7 @@ type ConversationRepository interface {
 	AddParticipant(ctx context.Context, participant *ConversationParticipant) error
 	RemoveParticipant(ctx context.Context, conversationID int64, userID int64) error
 	GetParticipants(ctx context.Context, conversationID int64) ([]*ConversationParticipant, error)
+	UpdateConversationTimestamp(ctx context.Context, id int64) error
 }
 
 // PostgresConversationRepository implements ConversationRepository using PostgreSQL.
@@ -169,4 +170,26 @@ func (r *PostgresConversationRepository) GetParticipants(ctx context.Context, co
 		return nil, err
 	}
 	return list, nil
+}
+
+// UpdateConversationTimestamp updates the updated_at column to current time.
+func (r *PostgresConversationRepository) UpdateConversationTimestamp(ctx context.Context, id int64) error {
+	query := `
+		UPDATE conversations
+		SET updated_at = CURRENT_TIMESTAMP
+		WHERE id = $1
+	`
+	res, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return err
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrConversationNotFound
+	}
+	return nil
 }
