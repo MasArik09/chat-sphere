@@ -1,0 +1,2 @@
+ALTER TABLE conversation_participants
+DROP COLUMN last_read_message_id;

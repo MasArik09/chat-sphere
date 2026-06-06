@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"chatsphere/internal/database"
 )
 
 var (
@@ -13,12 +15,26 @@ var (
 	ErrInvalidParticipants = errors.New("a conversation must have exactly two participants")
 )
 
+type ReadEvent struct {
+	ConversationID    int64
+	UserID            int64
+	LastReadMessageID int64
+	ParticipantIDs    []int64
+}
+
+type ConversationEventHub interface {
+	BroadcastReadReceipt(event ReadEvent)
+}
+
 // ConversationResponse represents basic conversation details for list query views.
 type ConversationResponse struct {
-	ID               int64     `json:"id"`
-	ParticipantCount int       `json:"participant_count"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               int64                      `json:"id"`
+	ParticipantCount int                        `json:"participant_count"`
+	CreatedAt        time.Time                  `json:"created_at"`
+	UpdatedAt        time.Time                  `json:"updated_at"`
+	Participants     []*ConversationParticipant `json:"participants"`
+	LastMessage      *MessagePreview            `json:"last_message,omitempty"`
+	UnreadCount      int                        `json:"unread_count"`
 }
 
 // ConversationDetailResponse holds full details including the participant maps.
@@ -29,24 +45,27 @@ type ConversationDetailResponse struct {
 
 // ConversationService orchestrates operations on conversations.
 type ConversationService interface {
-	CreateConversation(ctx context.Context, creatorID int64, participantIDs []int64) (*Conversation, error)
-	GetUserConversations(ctx context.Context, userID int64) ([]*ConversationResponse, error)
+	CreateConversation(ctx context.Context, creatorID int64, participantIDs []int64) (*ConversationDetailResponse, error)
+	GetUserConversations(ctx context.Context, userID int64, search string) ([]*ConversationResponse, error)
 	GetConversationDetail(ctx context.Context, userID int64, conversationID int64) (*ConversationDetailResponse, error)
 	AddParticipant(ctx context.Context, requesterID int64, conversationID int64, userID int64) error
 	RemoveParticipant(ctx context.Context, requesterID int64, conversationID int64, userID int64) error
+	MarkAsRead(ctx context.Context, userID int64, conversationID int64, messageID int64) error
 }
 
 type conversationService struct {
-	repo ConversationRepository
+	repo     ConversationRepository
+	tm       database.TransactionManager
+	eventHub ConversationEventHub
 }
 
 // NewConversationService creates a new ConversationService.
-func NewConversationService(repo ConversationRepository) ConversationService {
-	return &conversationService{repo: repo}
+func NewConversationService(repo ConversationRepository, tm database.TransactionManager, eventHub ConversationEventHub) ConversationService {
+	return &conversationService{repo: repo, tm: tm, eventHub: eventHub}
 }
 
 // CreateConversation inserts a new conversation record, enforcing duplicate checks.
-func (s *conversationService) CreateConversation(ctx context.Context, creatorID int64, participantIDs []int64) (*Conversation, error) {
+func (s *conversationService) CreateConversation(ctx context.Context, creatorID int64, participantIDs []int64) (*ConversationDetailResponse, error) {
 	// Deduplicate and filter out creator ID to determine the other participant
 	var otherUserID int64
 	for _, pid := range participantIDs {
@@ -61,79 +80,82 @@ func (s *conversationService) CreateConversation(ctx context.Context, creatorID 
 		return nil, ErrInvalidParticipants
 	}
 
-	// 1. Check duplicate conversation: Get all conversations for creatorID
-	convs, err := s.repo.GetUserConversations(ctx, creatorID)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, c := range convs {
-		participants, err := s.repo.GetParticipants(ctx, c.ID)
+	// 1. Check duplicate conversation using optimized single query
+	conv, err := s.repo.GetConversationByParticipants(ctx, creatorID, otherUserID)
+	if err == nil {
+		participants, err := s.repo.GetParticipants(ctx, conv.ID)
 		if err != nil {
 			return nil, err
 		}
+		return &ConversationDetailResponse{
+			Conversation: *conv,
+			Participants: participants,
+		}, nil
+	}
+	if !errors.Is(err, ErrConversationNotFound) {
+		return nil, err
+	}
 
-		// Look for other participant in this conversation
-		isOtherIn := false
-		for _, p := range participants {
-			if p.UserID == otherUserID {
-				isOtherIn = true
-				break
-			}
+	// 2. Create new conversation and add participants within a transaction
+	var c *Conversation
+	txErr := s.tm.WithinTransaction(ctx, func(txCtx context.Context) error {
+		var err error
+		c, err = s.repo.CreateConversation(txCtx)
+		if err != nil {
+			return err
 		}
 
-		if isOtherIn && len(participants) == 2 {
-			// Duplicate private conversation found, return the existing conversation
-			return c, nil
+		err = s.repo.AddParticipant(txCtx, &ConversationParticipant{
+			ConversationID: c.ID,
+			UserID:         creatorID,
+		})
+		if err != nil {
+			return err
 		}
-	}
 
-	// 2. Create new conversation
-	c, err := s.repo.CreateConversation(ctx)
-	if err != nil {
-		return nil, err
-	}
+		err = s.repo.AddParticipant(txCtx, &ConversationParticipant{
+			ConversationID: c.ID,
+			UserID:         otherUserID,
+		})
+		if err != nil {
+			return err
+		}
 
-	// 3. Add creator
-	err = s.repo.AddParticipant(ctx, &ConversationParticipant{
-		ConversationID: c.ID,
-		UserID:         creatorID,
+		return nil
 	})
+
+	if txErr != nil {
+		return nil, txErr
+	}
+
+	participants, err := s.repo.GetParticipants(ctx, c.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	// 4. Add other participant
-	err = s.repo.AddParticipant(ctx, &ConversationParticipant{
-		ConversationID: c.ID,
-		UserID:         otherUserID,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return c, nil
+	return &ConversationDetailResponse{
+		Conversation: *c,
+		Participants: participants,
+	}, nil
 }
 
-// GetUserConversations fetches a list of conversations for a user.
-func (s *conversationService) GetUserConversations(ctx context.Context, userID int64) ([]*ConversationResponse, error) {
-	convs, err := s.repo.GetUserConversations(ctx, userID)
+// GetUserConversations fetches a list of conversations for a user, with optional search filter.
+func (s *conversationService) GetUserConversations(ctx context.Context, userID int64, search string) ([]*ConversationResponse, error) {
+	convs, err := s.repo.GetUserConversations(ctx, userID, search)
 	if err != nil {
 		return nil, err
 	}
 
 	var resp []*ConversationResponse
 	for _, c := range convs {
-		participants, err := s.repo.GetParticipants(ctx, c.ID)
-		if err != nil {
-			return nil, err
-		}
-
 		resp = append(resp, &ConversationResponse{
 			ID:               c.ID,
-			ParticipantCount: len(participants),
+			ParticipantCount: len(c.Participants),
 			CreatedAt:        c.CreatedAt,
 			UpdatedAt:        c.UpdatedAt,
+			Participants:     c.Participants,
+			LastMessage:      c.LastMessage,
+			UnreadCount:      c.UnreadCount,
 		})
 	}
 
@@ -221,4 +243,45 @@ func (s *conversationService) RemoveParticipant(ctx context.Context, requesterID
 
 	// 2. Remove participant
 	return s.repo.RemoveParticipant(ctx, conversationID, userID)
+}
+
+// MarkAsRead updates the user's read cursor and broadcasts the receipt.
+func (s *conversationService) MarkAsRead(ctx context.Context, userID int64, conversationID int64, messageID int64) error {
+	// 1. Verify membership and get partner IDs
+	participants, err := s.repo.GetParticipants(ctx, conversationID)
+	if err != nil {
+		return err
+	}
+
+	isMember := false
+	var partnerIDs []int64
+	for _, p := range participants {
+		if p.UserID == userID {
+			isMember = true
+		} else {
+			partnerIDs = append(partnerIDs, p.UserID)
+		}
+	}
+
+	if !isMember {
+		return ErrUnauthorized
+	}
+
+	// 2. Update database
+	err = s.repo.UpdateLastReadMessage(ctx, conversationID, userID, messageID)
+	if err != nil {
+		return err
+	}
+
+	// 3. Broadcast read receipt to partners
+	if s.eventHub != nil && len(partnerIDs) > 0 {
+		s.eventHub.BroadcastReadReceipt(ReadEvent{
+			ConversationID:    conversationID,
+			UserID:            userID,
+			LastReadMessageID: messageID,
+			ParticipantIDs:    partnerIDs,
+		})
+	}
+
+	return nil
 }

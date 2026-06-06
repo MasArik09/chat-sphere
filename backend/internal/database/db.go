@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -9,6 +10,79 @@ import (
 	_ "github.com/lib/pq"
 	"chatsphere/pkg/config"
 )
+
+// DBTX defines the common query execution methods shared by *sql.DB and *sql.Tx.
+type DBTX interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+	PrepareContext(context.Context, string) (*sql.Stmt, error)
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
+}
+
+type txKey struct{}
+
+// WithTx injects a database transaction into the context.
+func WithTx(ctx context.Context, tx *sql.Tx) context.Context {
+	return context.WithValue(ctx, txKey{}, tx)
+}
+
+// GetTx extracts the transaction from context if present.
+func GetTx(ctx context.Context) *sql.Tx {
+	if tx, ok := ctx.Value(txKey{}).(*sql.Tx); ok {
+		return tx
+	}
+	return nil
+}
+
+// TransactionManager handles database transaction execution boundaries.
+type TransactionManager interface {
+	WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error
+}
+
+type postgresTransactionManager struct {
+	db *sql.DB
+}
+
+// NewTransactionManager instantiates a TransactionManager wrapper.
+func NewTransactionManager(db *sql.DB) TransactionManager {
+	return &postgresTransactionManager{db: db}
+}
+
+type noopTransactionManager struct{}
+
+func (n *noopTransactionManager) WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	return fn(ctx)
+}
+
+// NewNoopTransactionManager instantiates a no-op TransactionManager for testing.
+func NewNoopTransactionManager() TransactionManager {
+	return &noopTransactionManager{}
+}
+
+func (tm *postgresTransactionManager) WithinTransaction(ctx context.Context, fn func(ctx context.Context) error) error {
+	tx, err := tm.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin tx: %w", err)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p) // re-throw panic after rollback
+		}
+	}()
+
+	txCtx := WithTx(ctx, tx)
+	if err := fn(txCtx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit tx: %w", err)
+	}
+	return nil
+}
 
 func Connect(cfg *config.Config) (*sql.DB, error) {
 	connStr := fmt.Sprintf(

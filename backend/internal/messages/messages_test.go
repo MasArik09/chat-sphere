@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"chatsphere/internal/conversations"
+	"chatsphere/internal/database"
 	"chatsphere/internal/messages"
 )
 
@@ -29,8 +30,16 @@ func (m *MockConversationRepository) GetConversationByID(ctx context.Context, id
 	return &conversations.Conversation{ID: id}, nil
 }
 
-func (m *MockConversationRepository) GetUserConversations(ctx context.Context, userID int64) ([]*conversations.Conversation, error) {
+func (m *MockConversationRepository) GetUserConversations(ctx context.Context, userID int64, search string) ([]*conversations.Conversation, error) {
 	return nil, nil
+}
+
+func (m *MockConversationRepository) UpdateLastReadMessage(ctx context.Context, conversationID int64, userID int64, messageID int64) error {
+	return nil
+}
+
+func (m *MockConversationRepository) GetUnreadCount(ctx context.Context, conversationID int64, userID int64, lastReadMessageID int64) (int, error) {
+	return 0, nil
 }
 
 func (m *MockConversationRepository) AddParticipant(ctx context.Context, p *conversations.ConversationParticipant) error {
@@ -52,6 +61,14 @@ func (m *MockConversationRepository) GetParticipants(ctx context.Context, conver
 func (m *MockConversationRepository) UpdateConversationTimestamp(ctx context.Context, id int64) error {
 	m.updated[id] = time.Now()
 	return nil
+}
+
+func (m *MockConversationRepository) GetConversationByParticipants(ctx context.Context, userID1, userID2 int64) (*conversations.Conversation, error) {
+	return nil, conversations.ErrConversationNotFound
+}
+
+func (m *MockConversationRepository) GetConversationPartners(ctx context.Context, userID int64) ([]int64, error) {
+	return nil, nil
 }
 
 // MockMessageRepository mock db operations.
@@ -105,7 +122,7 @@ func TestMessagesFlow(t *testing.T) {
 		nextMsgID: 1,
 	}
 
-	service := messages.NewMessageService(msgRepo, convRepo)
+	service := messages.NewMessageService(msgRepo, convRepo, nil, database.NewNoopTransactionManager())
 	handler := messages.NewMessageHandler(service)
 
 	router := gin.New()

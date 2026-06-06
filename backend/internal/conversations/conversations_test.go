@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"chatsphere/internal/conversations"
+	"chatsphere/internal/database"
 )
 
 // MockConversationRepository mock db operations.
@@ -49,12 +50,15 @@ func (m *MockConversationRepository) GetConversationByID(ctx context.Context, id
 	return c, nil
 }
 
-func (m *MockConversationRepository) GetUserConversations(ctx context.Context, userID int64) ([]*conversations.Conversation, error) {
+func (m *MockConversationRepository) GetUserConversations(ctx context.Context, userID int64, search string) ([]*conversations.Conversation, error) {
 	var list []*conversations.Conversation
 	for cid, pList := range m.participants {
 		for _, p := range pList {
 			if p.UserID == userID {
-				list = append(list, m.conversations[cid])
+				conv := m.conversations[cid]
+				conv.Participants = pList
+				conv.UnreadCount = 0
+				list = append(list, conv)
 				break
 			}
 		}
@@ -107,11 +111,72 @@ func (m *MockConversationRepository) GetParticipants(ctx context.Context, conver
 	return pList, nil
 }
 
+func (m *MockConversationRepository) UpdateConversationTimestamp(ctx context.Context, id int64) error {
+	return nil
+}
+
+func (m *MockConversationRepository) GetConversationByParticipants(ctx context.Context, userID1, userID2 int64) (*conversations.Conversation, error) {
+	for cid, pList := range m.participants {
+		if len(pList) == 2 {
+			has1 := false
+			has2 := false
+			for _, p := range pList {
+				if p.UserID == userID1 {
+					has1 = true
+				}
+				if p.UserID == userID2 {
+					has2 = true
+				}
+			}
+			if has1 && has2 {
+				return m.conversations[cid], nil
+			}
+		}
+	}
+	return nil, conversations.ErrConversationNotFound
+}
+
+func (m *MockConversationRepository) UpdateLastReadMessage(ctx context.Context, conversationID int64, userID int64, messageID int64) error {
+	if messageID == 999 {
+		return conversations.ErrInvalidMessage
+	}
+	return nil
+}
+
+func (m *MockConversationRepository) GetUnreadCount(ctx context.Context, conversationID int64, userID int64, lastReadMessageID int64) (int, error) {
+	return 0, nil
+}
+
+func (m *MockConversationRepository) GetConversationPartners(ctx context.Context, userID int64) ([]int64, error) {
+	partnerSet := make(map[int64]bool)
+	for _, pList := range m.participants {
+		hasUser := false
+		for _, p := range pList {
+			if p.UserID == userID {
+				hasUser = true
+				break
+			}
+		}
+		if hasUser {
+			for _, p := range pList {
+				if p.UserID != userID {
+					partnerSet[p.UserID] = true
+				}
+			}
+		}
+	}
+	partners := make([]int64, 0, len(partnerSet))
+	for pID := range partnerSet {
+		partners = append(partners, pID)
+	}
+	return partners, nil
+}
+
 func TestConversationsFlow(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	repo := NewMockConversationRepository()
-	service := conversations.NewConversationService(repo)
+	service := conversations.NewConversationService(repo, database.NewNoopTransactionManager(), nil)
 	handler := conversations.NewConversationHandler(service)
 
 	router := gin.New()
@@ -127,6 +192,7 @@ func TestConversationsFlow(t *testing.T) {
 	router.GET("/conversations/:id", handler.Detail)
 	router.POST("/conversations/:id/participants", handler.AddParticipant)
 	router.DELETE("/conversations/:id/participants/:userId", handler.RemoveParticipant)
+	router.POST("/conversations/:id/read", handler.Read)
 
 	// 1. Create Conversation
 	createReq := conversations.CreateConversationRequest{
@@ -203,5 +269,38 @@ func TestConversationsFlow(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected status 403 Forbidden for non-member, got %d", w.Code)
+	}
+
+	// 8. Read receipt testing
+	mockUserID = 1 // Switch back to member
+	readReq := conversations.ReadRequest{
+		LastReadMessageID: 10,
+	}
+	readBody, _ := json.Marshal(readReq)
+	req, _ = http.NewRequest("POST", "/conversations/1/read", bytes.NewBuffer(readBody))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for read receipt, got %d", w.Code)
+	}
+
+	// 8b. Invalid message ID read receipt validation
+	invalidReadReq := conversations.ReadRequest{
+		LastReadMessageID: 999,
+	}
+	invalidReadBody, _ := json.Marshal(invalidReadReq)
+	req, _ = http.NewRequest("POST", "/conversations/1/read", bytes.NewBuffer(invalidReadBody))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400 Bad Request for invalid message, got %d", w.Code)
+	}
+
+	// 9. Search conversations
+	req, _ = http.NewRequest("GET", "/conversations?search=test", nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for search list, got %d", w.Code)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"chatsphere/internal/conversations"
+	"chatsphere/internal/database"
 )
 
 var (
@@ -18,6 +19,16 @@ var (
 	ErrContentTooLong = errors.New("message content exceeds 2000 characters")
 )
 
+type MessageEvent struct {
+	ConversationID int64
+	ParticipantIDs []int64
+	Message        *Message
+}
+
+type MessageEventHub interface {
+	BroadcastMessage(event MessageEvent)
+}
+
 // MessageService handles business rules and verification for messages.
 type MessageService interface {
 	SendMessage(ctx context.Context, senderID int64, conversationID int64, content string) (*Message, error)
@@ -27,13 +38,17 @@ type MessageService interface {
 type messageService struct {
 	messageRepo      MessageRepository
 	conversationRepo conversations.ConversationRepository
+	eventHub         MessageEventHub
+	tm               database.TransactionManager
 }
 
 // NewMessageService creates a new MessageService.
-func NewMessageService(messageRepo MessageRepository, conversationRepo conversations.ConversationRepository) MessageService {
+func NewMessageService(messageRepo MessageRepository, conversationRepo conversations.ConversationRepository, eventHub MessageEventHub, tm database.TransactionManager) MessageService {
 	return &messageService{
 		messageRepo:      messageRepo,
 		conversationRepo: conversationRepo,
+		eventHub:         eventHub,
+		tm:               tm,
 	}
 }
 
@@ -75,14 +90,33 @@ func (s *messageService) SendMessage(ctx context.Context, senderID int64, conver
 		Content:        trimmed,
 	}
 
-	err = s.messageRepo.CreateMessage(ctx, msg)
-	if err != nil {
-		return nil, err
+	txErr := s.tm.WithinTransaction(ctx, func(txCtx context.Context) error {
+		err = s.messageRepo.CreateMessage(txCtx, msg)
+		if err != nil {
+			return err
+		}
+
+		err = s.conversationRepo.UpdateConversationTimestamp(txCtx, conversationID)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+
+	if txErr != nil {
+		return nil, txErr
 	}
 
-	err = s.conversationRepo.UpdateConversationTimestamp(ctx, conversationID)
-	if err != nil {
-		return nil, err
+	if s.eventHub != nil {
+		participantIDs := make([]int64, len(participants))
+		for i, p := range participants {
+			participantIDs[i] = p.UserID
+		}
+		s.eventHub.BroadcastMessage(MessageEvent{
+			ConversationID: conversationID,
+			ParticipantIDs: participantIDs,
+			Message:        msg,
+		})
 	}
 
 	return msg, nil

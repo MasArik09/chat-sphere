@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"time"
+
+	"chatsphere/internal/database"
 )
 
 var (
@@ -29,6 +31,13 @@ func NewPostgresMessageRepository(db *sql.DB) MessageRepository {
 	return &PostgresMessageRepository{db: db}
 }
 
+func (r *PostgresMessageRepository) getDB(ctx context.Context) database.DBTX {
+	if tx := database.GetTx(ctx); tx != nil {
+		return tx
+	}
+	return r.db
+}
+
 // CreateMessage inserts a new message record.
 func (r *PostgresMessageRepository) CreateMessage(ctx context.Context, msg *Message) error {
 	if msg.SentAt.IsZero() {
@@ -40,7 +49,7 @@ func (r *PostgresMessageRepository) CreateMessage(ctx context.Context, msg *Mess
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, created_at, updated_at
 	`
-	err := r.db.QueryRowContext(
+	err := r.getDB(ctx).QueryRowContext(
 		ctx, query,
 		msg.ConversationID, msg.SenderID, msg.Content, msg.SentAt,
 	).Scan(&msg.ID, &msg.CreatedAt, &msg.UpdatedAt)
@@ -60,7 +69,7 @@ func (r *PostgresMessageRepository) GetMessagesByConversation(ctx context.Contex
 		ORDER BY sent_at ASC, id ASC
 		LIMIT $2 OFFSET $3
 	`
-	rows, err := r.db.QueryContext(ctx, query, conversationID, limit, offset)
+	rows, err := r.getDB(ctx).QueryContext(ctx, query, conversationID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +102,7 @@ func (r *PostgresMessageRepository) GetLatestMessage(ctx context.Context, conver
 		LIMIT 1
 	`
 	var m Message
-	err := r.db.QueryRowContext(ctx, query, conversationID).Scan(
+	err := r.getDB(ctx).QueryRowContext(ctx, query, conversationID).Scan(
 		&m.ID, &m.ConversationID, &m.SenderID, &m.Content, &m.SentAt, &m.CreatedAt, &m.UpdatedAt,
 	)
 	if err != nil {

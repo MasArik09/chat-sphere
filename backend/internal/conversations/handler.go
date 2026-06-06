@@ -68,7 +68,8 @@ func (h *ConversationHandler) List(c *gin.Context) {
 	}
 	userID := userIDVal.(int64)
 
-	convs, err := h.service.GetUserConversations(c.Request.Context(), userID)
+	search := c.Query("search")
+	convs, err := h.service.GetUserConversations(c.Request.Context(), userID, search)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to list conversations"})
 		return
@@ -198,5 +199,52 @@ func (h *ConversationHandler) RemoveParticipant(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "Participant removed successfully",
+	})
+}
+
+// ReadRequest binds last read message input.
+type ReadRequest struct {
+	LastReadMessageID int64 `json:"last_read_message_id" binding:"required"`
+}
+
+// Read updates the read receipt cursor for the user.
+func (h *ConversationHandler) Read(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"success": false, "message": "Unauthorized"})
+		return
+	}
+	userID := userIDVal.(int64)
+
+	convIDStr := c.Param("id")
+	convID, err := strconv.ParseInt(convIDStr, 10, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid conversation ID"})
+		return
+	}
+
+	var req ReadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+
+	err = h.service.MarkAsRead(c.Request.Context(), userID, convID, req.LastReadMessageID)
+	if err != nil {
+		if errors.Is(err, ErrUnauthorized) {
+			c.JSON(http.StatusForbidden, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		if errors.Is(err, ErrInvalidMessage) {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Failed to mark conversation as read"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "Conversation marked as read successfully",
 	})
 }
